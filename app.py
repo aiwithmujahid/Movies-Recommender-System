@@ -1,98 +1,103 @@
-import streamlit as st
-import pickle
-import pandas as pd
+import os
+
 import requests
+import streamlit as st
+
+from recommender import PROCESSED_FILE, Recommender, build_similarity, load_movies
+
+st.set_page_config(page_title="Movie Recommender System", page_icon="🎬", layout="wide")
+
+TMDB_API_URL = "https://api.themoviedb.org/3/movie/{movie_id}"
+TMDB_IMAGE_URL = "https://image.tmdb.org/t/p/w500{poster_path}"
+PLACEHOLDER_POSTER = "https://placehold.co/500x750/1f1f1f/ffffff?text=No+Poster"
+NUM_RECOMMENDATIONS = 5
 
 
-# -----------------------------
-# Load movie data
-# -----------------------------
-movies_dict = pickle.load(open("movies_dict.pkl", "rb"))
-movies = pd.DataFrame(movies_dict)
-
-similarity = pickle.load(open("similarity.pkl", "rb"))
-
-
-# -----------------------------
-# Fetch poster from TMDB API
-# -----------------------------
-def fetch_poster(movie_id):
-    url = (
-        "https://api.themoviedb.org/3/movie/{}"
-        "?api_key=8265bd1679663a7ea12ac168da84d2e8"
-        "&language=en-US"
-    ).format(movie_id)
-
-    response = requests.get(url, timeout=10)
-    data = response.json()
-
-    return "https://image.tmdb.org/t/p/w500/" + data["poster_path"]
+def get_tmdb_api_key() -> str | None:
+    """Read the TMDB key from Streamlit secrets or the environment (optional)."""
+    try:
+        key = st.secrets.get("TMDB_API_KEY")  # type: ignore[attr-defined]
+        if key:
+            return str(key)
+    except (FileNotFoundError, KeyError, AttributeError):
+        pass
+    return os.environ.get("TMDB_API_KEY") or None
 
 
-# -----------------------------
-# Recommend movies
-# -----------------------------
-def recommend(movie):
-    movie_index = movies[movies["title"] == movie].index[0]
+@st.cache_resource(show_spinner="Loading movie data…")
+def get_recommender() -> Recommender:
+    movies = load_movies(PROCESSED_FILE)
+    similarity = build_similarity(movies)
+    return Recommender(movies, similarity)
 
-    distances = similarity[movie_index]
 
-    movies_list = sorted(
-        list(enumerate(distances)),
-        reverse=True,
-        key=lambda x: x[1]
-    )[1:6]
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def fetch_poster(movie_id: int, api_key: str | None) -> str:
+    """Return a poster URL for the TMDB movie id, falling back to a placeholder."""
+    if not api_key:
+        return PLACEHOLDER_POSTER
+    try:
+        response = requests.get(
+            TMDB_API_URL.format(movie_id=movie_id),
+            params={"api_key": api_key, "language": "en-US"},
+            timeout=8,
+        )
+        response.raise_for_status()
+        poster_path = response.json().get("poster_path")
+        if poster_path:
+            return TMDB_IMAGE_URL.format(poster_path=poster_path)
+    except (requests.RequestException, ValueError):
+        pass
+    return PLACEHOLDER_POSTER
 
-    recommended_movies = []
-    recommended_movies_posters = []
 
-    for i in movies_list:
-        movie_id = movies.iloc[i[0]].movie_id
+def main() -> None:
+    st.title("🎬 Movie Recommender System")
+    st.caption(
+        "Content-based recommendations built from the TMDB 5000 dataset "
+        "(genres, keywords, cast, crew and overview)."
+    )
 
-        recommended_movies.append(
-            movies.iloc[i[0]].title
+    try:
+        recommender = get_recommender()
+    except (FileNotFoundError, ValueError) as exc:
+        st.error(f"Could not load the movie dataset: {exc}")
+        st.stop()
+
+    api_key = get_tmdb_api_key()
+    if not api_key:
+        st.info(
+            "Posters are disabled. Add a `TMDB_API_KEY` to Streamlit secrets "
+            "or the environment to show movie posters.",
+            icon="ℹ️",
         )
 
-        recommended_movies_posters.append(
-            fetch_poster(movie_id)
-        )
+    selected_title = st.selectbox(
+        "Choose a movie you like:",
+        recommender.titles,
+        index=None,
+        placeholder="Start typing a movie title…",
+    )
 
-    return recommended_movies, recommended_movies_posters
+    if st.button("Recommend", type="primary", disabled=selected_title is None):
+        try:
+            results = recommender.recommend(selected_title, n=NUM_RECOMMENDATIONS)
+        except KeyError as exc:
+            st.error(str(exc))
+            return
+
+        if results.empty:
+            st.warning("No recommendations found for this movie.")
+            return
+
+        st.subheader(f"Because you liked **{selected_title}**")
+        columns = st.columns(len(results))
+        for column, row in zip(columns, results.itertuples(index=False)):
+            with column:
+                st.image(fetch_poster(int(row.movie_id), api_key), width="stretch")
+                st.markdown(f"**{row.title}**")
+                st.caption(f"Similarity: {row.score:.0%}")
 
 
-# -----------------------------
-# Streamlit UI
-# -----------------------------
-st.title("🎬 Movie Recommender System")
-
-selected_movie_name = st.selectbox(
-    "Choose a movie you like:",
-    movies["title"].values
-)
-
-
-if st.button("Recommend"):
-
-    names, posters = recommend(selected_movie_name)
-
-    col1, col2, col3, col4, col5 = st.columns(5)
-
-    with col1:
-        st.text(names[0])
-        st.image(posters[0])
-
-    with col2:
-        st.text(names[1])
-        st.image(posters[1])
-
-    with col3:
-        st.text(names[2])
-        st.image(posters[2])
-
-    with col4:
-        st.text(names[3])
-        st.image(posters[3])
-
-    with col5:
-        st.text(names[4])
-        st.image(posters[4])
+if __name__ == "__main__":
+    main()

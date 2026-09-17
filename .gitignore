@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Raw dataset (download from Kaggle, see README)
+data/raw/
+
+# Local secrets
+.streamlit/secrets.toml
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
